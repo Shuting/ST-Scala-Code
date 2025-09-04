@@ -10,23 +10,22 @@ import numpy as np
 from cnn_transformer_fc import CNNTransformerFC, create_model
 
 
-def create_dummy_dataset(num_samples: int = 1000, seq_len: int = 15, 
-                        img_size: int = 64, channels: int = 3):
+def create_dummy_dataset(num_samples: int = 1000, channel_num: int = 45, 
+                        img_size: int = 64):
     """
     Create dummy radar chart dataset for demonstration
     
     Args:
         num_samples: Number of samples in dataset
-        seq_len: Sequence length (number of time steps)
+        channel_num: Number of input channels (15 timesteps * 3 RGB = 45)
         img_size: Image size (height and width)
-        channels: Number of input channels
     
     Returns:
-        dataset: TensorDataset containing input sequences and targets
+        dataset: TensorDataset containing input data and targets
     """
-    # Generate dummy radar chart sequences
-    # In practice, this would be real radar data
-    X = torch.randn(num_samples, seq_len, channels, img_size, img_size)
+    # Generate dummy radar chart data - stacked as channels
+    # In practice, this would be real radar data with 15 timesteps stacked as 45 channels
+    X = torch.randn(num_samples, channel_num, img_size, img_size)
     
     # Generate dummy precipitation targets (regression task)
     # In practice, this would be real precipitation measurements
@@ -40,8 +39,7 @@ def train_model():
     
     # Model configuration
     config = {
-        'input_channels': 3,
-        'sequence_length': 15,
+        'input_channels': 45,  # 15 timesteps * 3 RGB = 45 channels
         'cnn_feature_dim': 64,
         'transformer_dim': 96,
         'transformer_heads': 8,
@@ -131,8 +129,7 @@ def inference_example():
     """Example inference with the trained model"""
     
     config = {
-        'input_channels': 3,
-        'sequence_length': 15,
+        'input_channels': 45,  # 15 timesteps * 3 RGB = 45 channels
         'cnn_feature_dim': 64,
         'transformer_dim': 96,
         'transformer_heads': 8,
@@ -154,13 +151,12 @@ def inference_example():
     
     model.eval()
     
-    # Create sample input (15 radar charts)
+    # Create sample input (15 radar charts stacked as 45 channels)
     batch_size = 1
-    seq_len = 15
-    channels = 3
+    channel_num = 45  # 15 timesteps * 3 RGB channels
     img_size = 64
     
-    sample_input = torch.randn(batch_size, seq_len, channels, img_size, img_size).to(device)
+    sample_input = torch.randn(batch_size, channel_num, img_size, img_size).to(device)
     
     # Perform inference
     with torch.no_grad():

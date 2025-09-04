@@ -30,69 +30,71 @@ class PositionalEncoding(nn.Module):
 
 
 class CNNFeatureExtractor(nn.Module):
-    """CNN operations for processing radar chart features"""
+    """CNN operations for processing stacked radar chart features"""
     
-    def __init__(self, input_channels: int = 3, feature_dim: int = 64):
+    def __init__(self, input_channels: int = 45, feature_dim: int = 64):  # 15 timesteps * 3 RGB = 45 channels
         super().__init__()
         
-        # CNN layers for processing radar charts
+        # CNN layers for processing stacked radar charts (all 15 timesteps as channels)
         self.conv_layers = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
+            nn.Conv2d(input_channels, 64, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((8, 8)),  # Adaptive pooling to fixed size
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((4, 4)),
         )
         
         # Feature mapping layer
         self.feature_map = nn.Sequential(
-            nn.Linear(128 * 4 * 4, 256),
+            nn.Linear(256 * 4 * 4, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
-            nn.Linear(256, feature_dim)
+            nn.Linear(512, feature_dim)
         )
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Input tensor of shape [batch_size, seq_len, channels, height, width]
+            x: Input tensor of shape [batch_size, channel_num, height, width]
+               where channel_num = 15 timesteps * 3 RGB channels = 45
         Returns:
-            features: Tensor of shape [batch_size, seq_len, feature_dim]
+            features: Tensor of shape [batch_size, feature_dim]
         """
-        batch_size, seq_len, channels, height, width = x.shape
-        
-        # Reshape to process all images in batch
-        x = x.view(batch_size * seq_len, channels, height, width)
-        
         # Apply CNN layers
-        x = self.conv_layers(x)
+        x = self.conv_layers(x)  # [batch_size, 256, 4, 4]
         
         # Flatten and apply feature mapping
-        x = x.view(batch_size * seq_len, -1)
-        features = self.feature_map(x)
-        
-        # Reshape back to sequence format
-        features = features.view(batch_size, seq_len, -1)
+        x = x.view(x.size(0), -1)  # [batch_size, 256*4*4]
+        features = self.feature_map(x)  # [batch_size, feature_dim]
         
         return features
 
 
-class TransformerEncoder(nn.Module):
-    """Transformer encoder with positional encoding"""
+class SpatialTransformerEncoder(nn.Module):
+    """Transformer encoder for spatial patches with positional encoding"""
     
     def __init__(self, 
-                 d_model: int = 96,  # Changed to 96 (divisible by 8)
+                 input_dim: int = 64,  # CNN feature dimension
+                 d_model: int = 96,  # Transformer dimension (divisible by 8)
                  nhead: int = 8,
                  num_layers: int = 6,
-                 dim_feedforward: int = 384,  # Adjusted proportionally
-                 dropout: float = 0.1):
+                 dim_feedforward: int = 384,
+                 dropout: float = 0.1,
+                 patch_size: int = 4):  # Size of spatial patches
         super().__init__()
         
         self.d_model = d_model
-        self.pos_encoding = PositionalEncoding(d_model)
+        self.patch_size = patch_size
+        self.num_patches = patch_size * patch_size  # 4x4 = 16 patches
+        
+        # Project input features to patches and then to transformer dimension
+        self.patch_projection = nn.Linear(input_dim, d_model)
+        
+        # Positional encoding for spatial patches
+        self.pos_encoding = PositionalEncoding(d_model, max_len=self.num_patches)
         
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -107,31 +109,37 @@ class TransformerEncoder(nn.Module):
             num_layers=num_layers
         )
         
-        # Layer to project CNN features to transformer dimension
-        self.input_projection = nn.Linear(64, d_model)  # From CNN feature_dim to d_model
-        
-    def forward(self, x: torch.Tensor, src_key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Input tensor of shape [batch_size, seq_len, feature_dim]
-            src_key_padding_mask: Mask for padding tokens
+            x: Input tensor of shape [batch_size, input_dim] - CNN features
         Returns:
-            output: Tensor of shape [batch_size, seq_len, d_model]
+            output: Tensor of shape [batch_size, d_model] - aggregated features
         """
-        # Project to transformer dimension
-        x = self.input_projection(x)  # [batch_size, seq_len, d_model]
+        batch_size = x.size(0)
         
-        # Transpose for transformer (seq_len, batch_size, d_model)
-        x = x.transpose(0, 1)
+        # Create spatial patches by replicating the feature vector
+        # This simulates spatial patches for transformer processing
+        patches = x.unsqueeze(1).repeat(1, self.num_patches, 1)  # [batch_size, num_patches, input_dim]
+        
+        # Add some spatial variation to patches (optional enhancement)
+        spatial_encoding = torch.randn(1, self.num_patches, x.size(1), device=x.device) * 0.1
+        patches = patches + spatial_encoding
+        
+        # Project to transformer dimension
+        patches = self.patch_projection(patches)  # [batch_size, num_patches, d_model]
+        
+        # Transpose for transformer (num_patches, batch_size, d_model)
+        patches = patches.transpose(0, 1)
         
         # Add positional encoding
-        x = self.pos_encoding(x)
+        patches = self.pos_encoding(patches)
         
         # Apply transformer encoder
-        output = self.transformer_encoder(x, src_key_padding_mask=src_key_padding_mask)
+        output = self.transformer_encoder(patches)  # [num_patches, batch_size, d_model]
         
-        # Transpose back to (batch_size, seq_len, d_model)
-        output = output.transpose(0, 1)
+        # Global average pooling across patches
+        output = output.mean(dim=0)  # [batch_size, d_model]
         
         return output
 
@@ -140,8 +148,7 @@ class CNNTransformerFC(nn.Module):
     """Complete CNN + Transformer + FC model for precipitation prediction"""
     
     def __init__(self,
-                 input_channels: int = 3,
-                 sequence_length: int = 15,
+                 input_channels: int = 45,  # 15 timesteps * 3 RGB = 45 channels
                  cnn_feature_dim: int = 64,
                  transformer_dim: int = 96,
                  transformer_heads: int = 8,
@@ -150,16 +157,15 @@ class CNNTransformerFC(nn.Module):
                  dropout: float = 0.1):
         super().__init__()
         
-        self.sequence_length = sequence_length
-        
-        # CNN feature extractor
+        # CNN feature extractor (processes all 15 timesteps as stacked channels)
         self.cnn_extractor = CNNFeatureExtractor(
             input_channels=input_channels,
             feature_dim=cnn_feature_dim
         )
         
-        # Transformer encoder
-        self.transformer = TransformerEncoder(
+        # Spatial Transformer encoder
+        self.transformer = SpatialTransformerEncoder(
+            input_dim=cnn_feature_dim,
             d_model=transformer_dim,
             nhead=transformer_heads,
             num_layers=transformer_layers,
@@ -177,35 +183,23 @@ class CNNTransformerFC(nn.Module):
             nn.Linear(128, num_classes)
         )
         
-        # Global pooling strategy for sequence aggregation
-        self.global_pool = nn.AdaptiveAvgPool1d(1)
-        
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Input tensor of shape [batch_size, seq_len, channels, height, width]
-               Represents 15 chronologically arranged radar charts
-            mask: Optional mask for padding sequences
+            x: Input tensor of shape [batch_size, channel_num, height, width]
+               where channel_num = 15 timesteps * 3 RGB channels = 45
+               Represents 15 chronologically arranged radar charts stacked as channels
         Returns:
             output: Predictions of shape [batch_size, num_classes]
         """
-        batch_size = x.size(0)
+        # Extract CNN features from stacked radar charts
+        cnn_features = self.cnn_extractor(x)  # [batch_size, cnn_feature_dim]
         
-        # Extract CNN features from radar charts
-        cnn_features = self.cnn_extractor(x)  # [batch_size, seq_len, cnn_feature_dim]
-        
-        # Apply transformer encoder
-        transformer_output = self.transformer(cnn_features, src_key_padding_mask=mask)
-        # [batch_size, seq_len, transformer_dim]
-        
-        # Global pooling across sequence dimension
-        # Transpose for pooling: [batch_size, transformer_dim, seq_len]
-        pooled = transformer_output.transpose(1, 2)
-        pooled = self.global_pool(pooled)  # [batch_size, transformer_dim, 1]
-        pooled = pooled.squeeze(-1)  # [batch_size, transformer_dim]
+        # Apply spatial transformer encoder
+        transformer_output = self.transformer(cnn_features)  # [batch_size, transformer_dim]
         
         # Apply fully connected layers for final prediction
-        output = self.fc_layers(pooled)  # [batch_size, num_classes]
+        output = self.fc_layers(transformer_output)  # [batch_size, num_classes]
         
         return output
     
@@ -234,10 +228,9 @@ def create_model(config: dict) -> CNNTransformerFC:
         model: Initialized CNNTransformerFC model
     """
     return CNNTransformerFC(
-        input_channels=config.get('input_channels', 3),
-        sequence_length=config.get('sequence_length', 15),
+        input_channels=config.get('input_channels', 45),  # 15 timesteps * 3 RGB
         cnn_feature_dim=config.get('cnn_feature_dim', 64),
-        transformer_dim=config.get('transformer_dim', 100),
+        transformer_dim=config.get('transformer_dim', 96),
         transformer_heads=config.get('transformer_heads', 8),
         transformer_layers=config.get('transformer_layers', 6),
         num_classes=config.get('num_classes', 1),
@@ -248,8 +241,7 @@ def create_model(config: dict) -> CNNTransformerFC:
 if __name__ == "__main__":
     # Example usage and testing
     config = {
-        'input_channels': 3,
-        'sequence_length': 15,
+        'input_channels': 45,  # 15 timesteps * 3 RGB = 45 channels
         'cnn_feature_dim': 64,
         'transformer_dim': 96,  # Changed to 96 (divisible by 8)
         'transformer_heads': 8,
@@ -260,18 +252,19 @@ if __name__ == "__main__":
     
     model = create_model(config)
     
-    # Test with dummy data
+    # Test with dummy data - new format: [batch_size, channel_num, height, width]
     batch_size = 4
-    seq_len = 15
-    channels = 3
+    channel_num = 45  # 15 timesteps * 3 RGB channels
     height = 64
     width = 64
     
-    dummy_input = torch.randn(batch_size, seq_len, channels, height, width)
+    dummy_input = torch.randn(batch_size, channel_num, height, width)
     
     print("Model architecture:")
     print(model)
     print(f"\nInput shape: {dummy_input.shape}")
+    print("Input format: [batch_size, channel_num, height, width]")
+    print("where channel_num = 15 timesteps × 3 RGB channels = 45")
     
     with torch.no_grad():
         output = model(dummy_input)
